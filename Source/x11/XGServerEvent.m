@@ -549,23 +549,34 @@ posixFileDescriptor: (NSPosixFileDescriptor*)fileDescriptor
 
         if (generic.flags.useWindowMakerIcons == 1)
           {
+            NSWindow *iconwin = [NSApp windowWithWindowNumber: cWin->number];
+            NSView *hitview = [[iconwin contentView] hitTest:eventLocation];
+
             /*
-             * We must hand over control of our icon/miniwindow
-             * to Window Maker.
+             * Pass control over to Window Maker 
+             * only if we are _not_ hitting regular control
+             * otherwise handle this event in normal way
              */
-            if ((cWin->win_attrs.window_style
-                 & (NSMiniWindowMask | NSIconWindowMask)) != 0
-                && eventType == NSLeftMouseDown)
+            if (hitview == nil || hitview == [iconwin contentView]) 
               {
-                if (cWin->parent == None)
-                  break;
-                xEvent.xbutton.window = cWin->parent;
-                XUngrabPointer(dpy, CurrentTime);
-                XSendEvent(dpy, cWin->parent, True,
-                           ButtonPressMask, &xEvent);
-                XFlush(dpy);
-                if (clickCount == 1)
-                  break;
+                /*
+                 * We must hand over control of our icon/miniwindow
+                 * to Window Maker.
+                 */
+                if ((cWin->win_attrs.window_style
+                     & (NSMiniWindowMask | NSIconWindowMask)) != 0
+                    && eventType == NSLeftMouseDown)
+                  {
+                    if (cWin->parent == None)
+                      break;
+                    xEvent.xbutton.window = cWin->parent;
+                    XUngrabPointer(dpy, CurrentTime);
+                    XSendEvent(dpy, cWin->parent, True,
+                               ButtonPressMask, &xEvent);
+                    XFlush(dpy);
+                    if (clickCount == 1)
+                      break;
+                  }
               }
           }
 
