@@ -551,13 +551,20 @@ posixFileDescriptor: (NSPosixFileDescriptor*)fileDescriptor
           {
             NSWindow *iconwin = [NSApp windowWithWindowNumber: cWin->number];
             NSView *hitview = [[iconwin contentView] hitTest:eventLocation];
+            BOOL enabled = NO;
 
             /*
              * Pass control over to Window Maker 
              * only if we are _not_ hitting regular control
              * otherwise handle this event in normal way
              */
-            if (hitview == nil || hitview == [iconwin contentView]) 
+
+            if ([hitview respondsToSelector:@selector(isEnabled)]) 
+              {
+                enabled = (BOOL)[hitview performSelector:@selector(isEnabled)];
+              }
+
+            if (hitview == nil || hitview == [iconwin contentView] || !enabled) 
               {
                 /*
                  * We must hand over control of our icon/miniwindow
