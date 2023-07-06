@@ -4482,7 +4482,7 @@ _screenSize(Display *dpy, int screen)
   
 #ifdef HAVE_XRANDR
   Window              root = [self xDisplayRootWindow];
-  XRRScreenResources *screen_res = XRRGetScreenResources(dpy, root);
+  XRRScreenResources *screen_res = XRRGetScreenResourcesCurrent(dpy, root);
 
   if (screen_res != NULL)
     {
