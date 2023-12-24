@@ -163,10 +163,19 @@ static NSArray *faFromFc(FcPattern *pat)
   float nsweight;
   unsigned int nstraits = 0;
   char *fcfamily, *fcstyle;
-  NSMutableString *name, *family, *style;
+  NSString *styleStr = nil;
+  NSString *name = nil;
+  NSMutableString *family, *style;
 #ifdef FC_POSTSCRIPT_NAME
   char *fcname;
 #endif
+
+  if (FcPatternGetString(pat, FC_STYLE, 0, (FcChar8 **)&fcstyle) == FcResultMatch)
+    {
+      styleStr = [NSString stringWithUTF8String: fcstyle];
+    }
+
+//  NSLog (@"family: %@, style: %s/%@", name, fcstyle, style);
 
   if (FcPatternGetInteger(pat, FC_WEIGHT, 0, &weight) != FcResultMatch
     || FcPatternGetInteger(pat, FC_SLANT,  0, &slant) != FcResultMatch
@@ -177,12 +186,6 @@ static NSArray *faFromFc(FcPattern *pat)
   if (FcPatternGetInteger(pat, FC_SPACING, 0, &spacing) == FcResultMatch)
     if (spacing==FC_MONO || spacing==FC_CHARCELL)
       nstraits |= NSFixedPitchFontMask;
-
-  name = [NSMutableString stringWithCapacity: 100];
-#ifdef FC_POSTSCRIPT_NAME
-  if (FcPatternGetString(pat, FC_POSTSCRIPT_NAME,  0, (FcChar8 **)&fcname) == FcResultMatch)
-    [name appendString: [NSMutableString stringWithUTF8String: fcname]];
-#endif
 
   family = [NSMutableString stringWithUTF8String: fcfamily];
   style = [NSMutableString stringWithCapacity: 100];
@@ -303,28 +306,40 @@ static NSArray *faFromFc(FcPattern *pat)
         break;
     }
 
-  if (![name length])	// no psname
+  if (styleStr == nil)
     {
-      NSDebugLLog(@"NSFont", @"Warning: synthesizing PSName for '%@ %@'", family, style);
-      [name appendString: family];
-      if ([style length] > 0)
+      styleStr = (NSString *)style;
+    }
+
+  if (![styleStr length])
+    {
+      styleStr =  @"Regular";
+    }
+
+#ifdef FC_POSTSCRIPT_NAME
+  if (FcPatternGetString(pat, FC_POSTSCRIPT_NAME,  0, (FcChar8 **)&fcname) == FcResultMatch)
+    {
+      name = [NSString stringWithUTF8String: fcname];
+    }
+#endif
+
+  if (!name || ![name length])	// no psname
+    {
+      NSMutableString *tmpStr;
+
+      tmpStr = [NSMutableString stringWithCapacity: 100];
+      NSDebugLLog(@"NSFont", @"Warning: synthesizing PSName for '%@ %@'", family, styleStr);
+      [tmpStr appendString: family];
+      if ([styleStr length] > 0 && ![styleStr isEqualToString: @"Regular"])
         {
-          [name appendString: @"-"];
-          [name appendString: style];
-        }
+          [tmpStr appendString: @"-"];
+          [tmpStr appendString: styleStr];
+	}
+      name = [NSString stringWithString: tmpStr];
     }
 
-  if (![style length])
-    {
-      [style setString: @"Regular"];
-    }
-
-  if (FcPatternGetString(pat, FC_STYLE, 0, (FcChar8 **)&fcstyle) == FcResultMatch)
-    style = [NSString stringWithUTF8String: fcstyle];
-
-//  NSLog (@"family: %@, style: %s/%@", name, fcstyle, style);
   return [NSArray arrayWithObjects: name, 
-		  style, 
+		  styleStr,
 		  [NSNumber numberWithFloat: nsweight],
 		  [NSNumber numberWithUnsignedInt: nstraits],
 		  nil];
