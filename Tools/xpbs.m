@@ -82,7 +82,9 @@ static char *atom_names[] = {
   "image/png",
   "image/svg",
   "application/rtf",
-  "text/richtext"
+  "text/richtext",
+  "text/plain;charset=utf-8",
+  "application/pdf"
 };
 static Atom atoms[sizeof(atom_names)/sizeof(char*)];
 
@@ -126,8 +128,121 @@ static Atom atoms[sizeof(atom_names)/sizeof(char*)];
 #define XG_MIME_SVG       atoms[33]
 #define XG_MIME_APP_RTF   atoms[34]
 #define XG_MIME_TEXT_RICHTEXT atoms[35]
+#define XG_MIME_UTF8		atoms[36]
+#define XG_MIME_PDF       	atoms[37]
+
+/** Return the GNUstep pasteboard type corresponding to the given atom
+ * or nil if there is no corresponding type.
+ * As a special case, return an empty string for special pasteboard types
+ * that supply X system information.
+ */
+static NSString *
+NSPasteboardTypeFromAtom(Atom type)
+{
+  if (XG_UTF8_STRING == type
+    || XA_STRING == type
+    || XG_TEXT == type
+    || XG_MIME_PLAIN == type
+    || XG_MIME_UTF8 == type)
+    {
+      return NSStringPboardType;
+    }
+
+  if (XG_FILE_NAME == type)
+    {
+      return NSFilenamesPboardType;
+    }
+
+  if (XG_MIME_RTF == type
+    || XG_MIME_APP_RTF == type
+    || XG_MIME_TEXT_RICHTEXT == type)
+    {
+      return NSRTFPboardType;
+    }
+
+  if (XG_MIME_HTML == type
+    || XG_MIME_XHTML == type)
+    {
+      return NSHTMLPboardType;
+    }
+
+  if (XG_MIME_URI == type)
+    {
+      return NSURLPboardType;
+    }
+
+  if (XG_MIME_PDF == type)
+    {
+      return NSPasteboardTypePDF;
+    }
+
+  if (XG_MIME_PS == type)
+    {
+      return NSPostScriptPboardType;
+    }
+
+  if (XG_MIME_PNG == type)
+    {
+      return NSPasteboardTypePNG;
+    }
+
+  if (XG_MIME_TIFF == type)
+    {
+      return NSTIFFPboardType;
+    }
+
+  if (XG_TARGETS == type
+    || XG_TIMESTAMP == type
+    || XG_OWNER_OS == type
+    || XG_USER == type
+    || XG_HOST_NAME == type
+    || XG_HOSTNAME == type
+    || XG_MULTIPLE == type)
+    {
+      return @"";	// X standard type
+    }
+
+  return nil;		// Unsupported type
+}
 
 
+
+/* Encapsulate state information for incremental transfer of data to property.
+ */
+@interface	Incremental : NSObject
+{
+  NSTimeInterval	start;		/* Timestamp start of transfer */
+  const char		*pname;		/* The target property name */
+  const char		*tname; 	/* The data type */
+  NSData		*data;		/* Data to be transferred */
+  NSInteger		offset;		/* Bytes sent so far */
+  int			format;		/* X format; 8, 16, or 32 bit values */
+  int			chunk;		/* Max bytes per change */
+  Atom			xType;		/* The data type atom */
+  Atom			property;	/* The property atom */
+  Window		window;		/* The target window */
+}
+
+/* Find an active transfer object for a trget property and window.
+ */
++ (Incremental*) findINCR: (Atom)p for: (Window)w;
+
+/* Create an active transfer object for a trget property and window.
+ */
++ (Incremental*) makeINCR: (Atom)p for: (Window)w;
+
+/* Abort a transfer by setting the target property to an empty value.
+ */
+- (void) abort;
+
+/* deal with a property deletion event ... transfer the next chunk.
+ */
+- (void) propertyDeleted;
+
+/* Set up a transfer.
+ */
+- (void) setData: (NSData*)d type: (Atom)t format: (int)f chunk: (int)c;
+@end
 
 @interface	XPbOwner : NSObject
 {
@@ -177,7 +292,7 @@ static Atom atoms[sizeof(atom_names)/sizeof(char*)];
 #endif
 - (BOOL) xProvideSelection: (XSelectionRequestEvent*)xEvent;
 - (Time) xTimeByAppending;
-- (BOOL) xSendData: (unsigned char*) data format: (int) format 
+- (BOOL) xSendData: (NSData*) data format: (int) format 
 	     items: (int) numItems type: (Atom) xType
 		to: (Window) window property: (Atom) property;
 @end
@@ -201,7 +316,9 @@ static Window		xAppWin;
 static NSMapTable	*ownByX;
 static NSMapTable	*ownByO;
 static NSString		*xWaitMode = @"XPasteboardWaitMode";
+#if HAVE_XFIXES
 static int              xFixesEventBase;
+#endif
 
 @implementation	XPbOwner
 
@@ -419,6 +536,7 @@ static int              xFixesEventBase;
 #if HAVE_XFIXES
       if (xEvent->type == xFixesEventBase + XFixesSelectionNotify)
        {
+	 NSDebugLLog(@"Pbs", @"XFixesSelectionNotify.");
          [self xFixesSelectionNotify: (XFixesSelectionNotifyEvent*)xEvent];
          break;
        }
@@ -460,11 +578,25 @@ static int              xFixesEventBase;
   o = [self ownerByXPb: xEvent->atom];
   if (o == nil)
     {
-      char *name = XGetAtomName(xDisplay, xEvent->atom);
-      NSDebugLLog(@"Pbs", @"Property notify for unknown property - '%s'.",
-                  name);
-      XFree(name);
-      return;
+      Incremental	*i;
+
+      i = [Incremental findINCR: xEvent->atom for: xEvent->window];
+      if (i)
+	{
+	  if (PropertyDelete == xEvent->state)
+	    {
+	      [i propertyDeleted];
+	    }
+	  return;
+	}
+      else
+	{
+	  char *name = XGetAtomName(xDisplay, xEvent->atom);
+	  NSDebugLLog(@"Pbs", @"Property notify for unknown property - '%s'.",
+		      name);
+	  XFree(name);
+	  return;
+	}
     }
 
   if (xEvent->window != (Window)xAppWin)
@@ -473,8 +605,10 @@ static int              xFixesEventBase;
       return;
     }
 
-  if (xEvent->time != 0)
+  if (xEvent->time > 0)
     {
+      NSDebugLLog(@"Pbs",
+	@"Property append notify time: %lu", (unsigned long)xEvent->time);
       [o setTimeOfLastAppend: xEvent->time];
     }
 }
@@ -659,7 +793,7 @@ static int              xFixesEventBase;
        * appropriate property of our application root window.
        */
       XConvertSelection(xDisplay, [self xPb], xType,
-                        [self xPb], xAppWin, whenRequested);
+	[self xPb], xAppWin, whenRequested);
       XFlush(xDisplay);
       
       /*
@@ -672,8 +806,8 @@ static int              xFixesEventBase;
        */
       limit = [NSDate dateWithTimeIntervalSinceNow: 20.0];
       [self setWaitingForSelection: whenRequested];
-      while (XQLength(xDisplay) > 0 &&
-             [self waitingForSelection] == whenRequested)
+      while (XQLength(xDisplay) > 0
+	&& [self waitingForSelection] == whenRequested)
         {
           XEvent xEvent;
 
@@ -700,6 +834,14 @@ static int              xFixesEventBase;
 
 - (void) pasteboard: (NSPasteboard*)pb provideDataForType: (NSString*)type
 {
+  Atom	xType = 0;
+  BOOL	debug = GSDebugSet(@"Pbs");
+
+  if (debug)
+    {
+      NSLog(@"Enter [%@ -pasteboard:provideDataForType:] %@, %@",
+	[[self osPb] name], pb, type);
+    }
   [self setData: nil];
 
   /*
@@ -709,28 +851,51 @@ static int              xFixesEventBase;
    */
   if ([type isEqual: NSStringPboardType])
     {
-      [self requestData: XG_UTF8_STRING];
+      [self requestData: (xType = XG_UTF8_STRING)];
       if ([self data] == nil)
-        [self requestData: XA_STRING];
+        [self requestData: (xType = XG_MIME_UTF8)];
       if ([self data] == nil)
-        [self requestData: XG_TEXT];
+        [self requestData: (xType = XA_STRING)];
+      if ([self data] == nil)
+        [self requestData: (xType = XG_TEXT)];
     }
   else if ([type isEqual: NSFilenamesPboardType])
     {
-
-      [self requestData: XG_FILE_NAME];
+      [self requestData: (xType = XG_FILE_NAME)];
     }
   else if ([type isEqual: NSRTFPboardType])
     {
-      [self requestData: XG_MIME_RTF];
+      [self requestData: (xType = XG_MIME_RTF)];
       if ([self data] == nil)
-        [self requestData: XG_MIME_APP_RTF];
+        [self requestData: (xType = XG_MIME_APP_RTF)];
       if ([self data] == nil)
-        [self requestData: XG_MIME_TEXT_RICHTEXT];
+        [self requestData: (xType = XG_MIME_TEXT_RICHTEXT)];
     }
   else if ([type isEqual: NSTIFFPboardType])
     {
-      [self requestData: XG_MIME_TIFF];
+      NSDebugLLog(@"Pbs", @"pasteboard: provideDataForType: - requestData XG_MIME_TIFF");
+      [self requestData: (xType = XG_MIME_TIFF)];
+    }
+  else if ([type isEqual: NSPasteboardTypePNG])
+    {
+      NSDebugLLog(@"Pbs", @"pasteboard: provideDataForType: - requestData XG_MIME_PNG");
+      [self requestData: (xType = XG_MIME_PNG)];
+    }
+  else if ([type isEqual: NSPasteboardTypePDF])
+    {
+      [self requestData: (xType = XG_MIME_PDF)];
+    }
+  else if ([type isEqual: NSPostScriptPboardType])
+    {
+      [self requestData: (xType = XG_MIME_PS)];
+    }
+  else if ([type isEqual: NSHTMLPboardType])
+    {
+      [self requestData: (xType = XG_MIME_HTML)];
+    }
+  else if ([type isEqual: NSURLPboardType])
+    {
+      [self requestData: (xType = XG_MIME_URI)];
     }
   // FIXME: Support more types
   else
@@ -738,6 +903,14 @@ static int              xFixesEventBase;
       NSDebugLLog(@"Pbs", @"Request for non-string info from X pasteboard: %@", type);
     }
   [pb setData: [self data] forType: type];
+  if (debug)
+    {
+      char	*name = XGetAtomName(xDisplay, xType);
+
+      NSLog(@"Exit [%@ -pasteboard:provideDataForType:] %s",
+	[[self osPb] name], name);
+      XFree(name);
+    }
 }
 
 - (void) setData: (NSData*)obj
@@ -775,11 +948,33 @@ static int              xFixesEventBase;
   return _xPb;
 }
 
-static BOOL appendFailure;
+static BOOL		changePropertyFailure;
+static XErrorEvent	changePropertyError;
 static int
 xErrorHandler(Display *d, XErrorEvent *e)
 {
-  appendFailure = YES;
+  changePropertyFailure = YES;
+  changePropertyError = *e;
+
+  if (GSDebugSet(@"Pbs"))
+    {
+      char	buf[256];
+
+      buf[sizeof(buf)-1] = '\0';
+      XGetErrorText(d, e->error_code, buf, sizeof(buf)-1);
+      NSLog(@"xErrorHandler type %d: %s (%d)\n"
+	@"\tResource ID: 0x%lx\n"
+	@"\tSerial Num: %lu\n"
+	@"\tError code: %u\n"
+	@"\tRequest op code: %u major, %u minor",
+	e->type, buf, e->error_code,
+	e->resourceid,
+	e->serial,
+	e->error_code,
+	e->request_code,
+	e->minor_code);
+    }
+
   return 0;
 }
 
@@ -790,74 +985,90 @@ xErrorHandler(Display *d, XErrorEvent *e)
  */
 - (NSArray*) availableTypes
 {
-  NSMutableArray *types;
-  NSData *data;
-  unsigned int count;
-  unsigned int i;
-  Atom *targets;
+  NSMutableArray	*types;
+  NSData 		*data;
+  unsigned		duplicates = 0;
+  unsigned		standard = 0;
+  unsigned		unsupported = 0;
+  NSMutableString	*bad = nil;
+  unsigned int		count;
+  unsigned int		i;
+  Atom			*targets;
+  BOOL			debug = GSDebugSet(@"Pbs");
 
-  NSDebugLLog(@"Pbs", @"%@ availableTypes called", [[self osPb] name]);
+  if (debug)
+    {
+      NSLog(@"Enter [%@ -availableTypes]", [[self osPb] name]);
+    }
 
   [self setData: nil];
   [self requestData: XG_TARGETS];
   data = [self data];
-  if (data == nil)
-    return [NSArray arrayWithObject: NSStringPboardType];
+  if (nil == data)
+    {
+      if (debug)
+	{
+	  NSLog(@"Exit [%@ -availableTypes]\n\tNo types found.",
+	    [[self osPb] name]);
+	}
+      return [NSArray array];
+    }
 
   count = [data length] / sizeof(Atom);
   targets = (Atom*)[data bytes];
   types = [NSMutableArray arrayWithCapacity: count];
 
-  NSDebugLLog(@"Pbs", @"%@ availableTypes: %d types available", [[self osPb] name], count);
-
   for (i = 0; i < count; i++)
     {
-      Atom type;
+      NSString	*pbType;
+      Atom 	type;
 
       type = targets[i];
-
-      if ((type == XG_UTF8_STRING) 
-          || (type == XA_STRING)
-          || (type == XG_TEXT)
-          || (type == XG_MIME_PLAIN))
-        {
-          [types addObject: NSStringPboardType];
-        }
-      else if (type == XG_FILE_NAME)
-        {
-          [types addObject: NSFilenamesPboardType];
-        }
-      else if ((type == XG_MIME_RTF)
-               || (type == XG_MIME_APP_RTF)
-	       || (type == XG_MIME_TEXT_RICHTEXT))
-        {
-          [types addObject: NSRTFPboardType];
-        }
-      else if (type == XG_MIME_TIFF)
-        {
-          [types addObject: NSTIFFPboardType];
-        }
-      else if ((type == XG_TARGETS)
-               || (type == XG_TIMESTAMP)
-               || (type == XG_OWNER_OS)
-               || (type == XG_USER)
-               || (type == XG_HOST_NAME)
-               || (type == XG_HOSTNAME)
-               || (type == XG_MULTIPLE))
-        {
-            // Standard types
-        }
-      // FIXME: Support more types
-      else
+      pbType = NSPasteboardTypeFromAtom(type);
+      if ([pbType length] > 0)
 	{
-          char *name = XGetAtomName(xDisplay, type);
-
-          // FIXME: We should rather add this type to the
-          // pasteboard as a string.
-          NSDebugLLog(@"Pbs", @"Unsupported selection type '%s' available", 
-                      name);
-          XFree(name);
+	  if ([types containsObject: pbType])
+	    {
+	      duplicates++;
+	    }
+	  else
+	    {
+	      [types addObject: pbType];
+	    }
 	}
+      else if (debug)
+	{
+	  if (nil == pbType)
+	    {
+	      char	*name = XGetAtomName(xDisplay, type);
+
+	      if (nil == bad)
+		{
+		  bad = [NSMutableString stringWithFormat:
+		    @"%s", name];
+		}
+	      else
+		{
+		  [bad appendFormat: @",%s", name];
+		}
+	      XFree(name);
+	      unsupported++;
+	    }
+	  else
+	    {
+	      standard++;
+	    }
+	}
+    }
+
+  if (debug)
+    {
+      NSLog(@"Exit [%@ -availableTypes]\n"
+	@"\tmapped:%u, duplicates:%u, standard:%u, unsupported:%u, total:%u\n"
+	@"\tavailable: %@\n\tunsupported: (%@)",
+	[[self osPb] name], (unsigned)[types count],
+	duplicates, standard, unsupported, (unsigned)count,
+	types, bad ? (id)bad : (id)@"");
     }
 
   return types;
@@ -870,47 +1081,62 @@ xErrorHandler(Display *d, XErrorEvent *e)
  */
 - (void) xSelectionClear
 {
+  NSDebugLLog(@"Pbs", @"xpbs - xSelectionClear");
   // FIXME: This will cause -pasteboardChangedOwner: to be called, which will
   // take ownership of the X selection. That is probably wrong...
   [_pb declareTypes: [self availableTypes] owner: self];
   [self setOwnedByOpenStep: NO];
 }
 
-- (NSMutableData*) getSelectionData: (XSelectionEvent*)xEvent
-                               type: (Atom*)type
+- (long) getSelectionData: (XSelectionEvent*)xEvent
+		     type: (Atom*)type
+		     size: (long)max
+		     into: (NSMutableData*)md
 {
   int		status;
   unsigned char	*data;
-  long long_offset = 0L;
-  long long_length = FULL_LENGTH;
-  Atom req_type = AnyPropertyType;
-  Atom actual_type;
+  long		bytes_added = 0L;
+  long		long_offset = 0L;
+  long 		long_length = FULL_LENGTH;
+  Atom 		req_type = AnyPropertyType;
+  Atom 		actual_type;
   int		actual_format;
   unsigned long	bytes_remaining;
   unsigned long	number_items;
-  NSMutableData	*md = nil;
+  BOOL		initial = YES;
 
+  if (max > long_length) long_length = max;
   /*
    * Read data from property identified in SelectionNotify event.
    */
   do
     {
       status = XGetWindowProperty(xDisplay,
-                                  xEvent->requestor,
-                                  xEvent->property,
-                                  long_offset,         // offset
-                                  long_length,
-                                  False,               // Aug 2011 - changed to False (don't delete property)
-                                  req_type,
-                                  &actual_type,
-                                  &actual_format,
-                                  &number_items,
-                                  &bytes_remaining,
-                                  &data);
-      
+	xEvent->requestor,
+	xEvent->property,
+	long_offset,
+	long_length,
+	True,			// delete after read (iff bytes_remaining == 0)
+	req_type,
+	&actual_type,
+	&actual_format,
+	&number_items,
+	&bytes_remaining,
+	&data);
+
+      if (GSDebugSet(@"Pbs"))
+	{
+	  char *name = XGetAtomName(xDisplay, actual_type);
+	  NSLog(@"offset %ld length %ld rtype %lu atype %lu %s aformat"
+	    @" %d nitems %lu remain %lu.",
+	    long_offset, long_length, req_type, actual_type, name,
+	    actual_format, number_items, bytes_remaining);
+	  XFree(name);
+	}
       if ((status == Success) && (number_items > 0))
         {
           long count;
+
 	  if (actual_type == XA_ATOM)
 	    {
 	      // xlib will report an actual_format of 32, even if
@@ -922,29 +1148,39 @@ xErrorHandler(Display *d, XErrorEvent *e)
 	      count = number_items * actual_format / 8;
 	    }
             
-          if (md == nil)
+          if (initial)
             {
-              md = [[NSMutableData alloc] initWithBytes: (void *)data
-                                          length: count];  
+	      NSUInteger	capacity = [md capacity];
+	      int		space = capacity - [md length];
+	      int		need = count + bytes_remaining;
+
+	      /* data buffer needs to be big enough for the whole property
+	       */
+	      initial = NO;
+	      if (space < need)
+		{
+		  capacity += need - space;
+		  [md setCapacity: capacity];
+		}
               req_type = actual_type;
             }
-          else
-            {
-              if (req_type != actual_type)
-                {
-                  char *req_name = XGetAtomName(xDisplay, req_type);
-                  char *act_name = XGetAtomName(xDisplay, actual_type);
-                  
-                  NSLog(@"Selection changed type from %s to %s.", 
-                        req_name, act_name);
-                  XFree(req_name);
-                  XFree(act_name);
-                  RELEASE(md);
-                  return nil;
-                }
-              [md appendBytes: (void *)data length: count];
+          else if (req_type != actual_type)
+	    {
+	      char *req_name = XGetAtomName(xDisplay, req_type);
+	      char *act_name = XGetAtomName(xDisplay, actual_type);
+	      
+	      NSLog(@"Selection changed type from %s to %s.", 
+		    req_name, act_name);
+	      XFree(req_name);
+	      XFree(act_name);
+	      if (data)
+		{
+		  XFree(data);
+		}
+	      return 0;
             }
-          
+          [md appendBytes: (void *)data length: count];
+          bytes_added += count;
           long_offset += count / 4;
           if (data)
             {
@@ -957,19 +1193,18 @@ xErrorHandler(Display *d, XErrorEvent *e)
   if (status == Success)
     {
       *type = actual_type;
-      return AUTORELEASE(md);
+      return bytes_added;
     }
   else
     {
-      RELEASE(md);
-      return nil;
+      return 0;
     }
 }
 
 - (void) xSelectionNotify: (XSelectionEvent*)xEvent
 {
   Atom actual_type;
-  NSMutableData	*md = nil;
+  NSMutableData	*md;
 
   if (xEvent->property == (Atom)None)
     {
@@ -980,46 +1215,65 @@ xErrorHandler(Display *d, XErrorEvent *e)
 
   if ([self waitingForSelection] > xEvent->time)
     {
-      NSDebugLLog(@"Pbs", @"Unexpected selection notify - time %lu.", xEvent->time);
+      NSDebugLLog(@"Pbs",
+	@"Unexpected selection notify - time %lu.", xEvent->time);
       return;
     }
   [self setWaitingForSelection: 0];
 
-  md = [self getSelectionData: xEvent type: &actual_type];
-
-  if (md != nil)
+  md = [NSMutableData dataWithCapacity: FULL_LENGTH];
+  if ([self getSelectionData: xEvent type: &actual_type size: 0 into: md] > 0)
     {
+      unsigned	count = 0;
+
       if (actual_type == XG_INCR)
         {
-          XEvent event;
-          NSMutableData	*imd = nil;
-          BOOL wait = YES;
+          XEvent	event;
+          BOOL		wait = YES;
+	  int32_t	size;
 
-	  // Need to delete the property to start transfer
-	  XDeleteProperty(xDisplay, xEvent->requestor, xEvent->property);
-          md = nil;
+	  /* The -getSelectionData:type:size: method already deleted the
+	   * property so the remote end should know it can start sending.
+	   */
+	  memcpy(&size, [md bytes], 4);
+	  NSDebugMLLog(@"INCR",
+	    @"Size for INCR chunks is %u bytes.", (unsigned)size);
+          [md setLength: 0];
+
+	  /* We expect to read multiple chunks, so to avoid excessive
+	   * reallocation of memory we grow the buffer to be big enough
+	   * to hold ten of them.
+	   */
+	  if (size * 10 > [md capacity])
+	    {
+	      [md setCapacity: size * 10];
+	    }
           while (wait)
             {
               XNextEvent(xDisplay, &event);
 
-              if (event.type == PropertyNotify)
+              if (event.type == PropertyNotify
+	        && event.xproperty.state == PropertyNewValue)
                 {
-                  if (event.xproperty.state != PropertyNewValue) continue;
+		  long	length;
 
-                  imd = [self getSelectionData: xEvent type: &actual_type];
-
-		  // delete the property to get the next transfer chunk
-		  XDeleteProperty(xDisplay, xEvent->requestor, xEvent->property);
-                  if (imd != nil)
+		  /* Getting the property data also deletes the property,
+		   * telling the other end to send the next chunk.
+		   * An empty chunk indicates end of transfer.
+		   */
+                  if ((length = [self getSelectionData: xEvent
+						  type: &actual_type
+						  size: size
+						  into: md]) > 0)
                     {
-                      if (md == nil)
-                        {
-                          md = imd;
-                        }
-                      else
-                        {
-                          [md appendData: imd];
-                        }
+		      if (GSDebugSet(@"INCR"))
+			{
+			  char *name = XGetAtomName(xDisplay, actual_type);
+			  NSLog(@"Retrieved %ld bytes type '%s'"
+			    @" from X selection.", length, name);
+			  XFree(name);
+			}
+		      count++;
                     }
                   else
                     {
@@ -1027,13 +1281,36 @@ xErrorHandler(Display *d, XErrorEvent *e)
                     }
                 }
             }
+	  if ([md length] == 0)
+	    {
+	      md = nil;
+	    }
         }
+      if (GSDebugSet(@"Pbs"))
+	{
+	  char *name = XGetAtomName(xDisplay, actual_type);
+
+	  if (count > 1)
+	    {
+	      NSLog(@"Retrieved %lu bytes type '%s' in %u chunks"
+		@" from X selection.",
+		(unsigned long)[md length], name, count);
+	    }
+	  else
+	    {
+	      NSLog(@"Retrieved %lu bytes type '%s' in single chunk"
+		@" from X selection.",
+		(unsigned long)[md length], name);
+	    }
+	  XFree(name);
+	}
     }
   
-  if (md != nil)
+  if ([md length] > 0)
     {
       // Convert data to text string.
-      if (actual_type == XG_UTF8_STRING)
+      if (actual_type == XG_UTF8_STRING
+	|| actual_type == XG_MIME_UTF8)
         {
           NSString	*s;
           NSData	*d;
@@ -1048,8 +1325,8 @@ xErrorHandler(Display *d, XErrorEvent *e)
             }
         }
       else if ((actual_type == XA_STRING)
-               || (actual_type == XG_TEXT)
-               || (actual_type == XG_MIME_PLAIN))
+        || (actual_type == XG_TEXT)
+        || (actual_type == XG_MIME_PLAIN))
         {
           NSString	*s;
           NSData	*d;
@@ -1084,12 +1361,33 @@ xErrorHandler(Display *d, XErrorEvent *e)
           RELEASE(url);
         }
       else if ((actual_type == XG_MIME_RTF)
-               || (actual_type == XG_MIME_APP_RTF)
-	       || (actual_type == XG_MIME_TEXT_RICHTEXT))
+        || (actual_type == XG_MIME_APP_RTF)
+        || (actual_type == XG_MIME_TEXT_RICHTEXT))
+        {
+          [self setData: md];
+        }
+      else if ((actual_type == XG_MIME_HTML)
+        || (actual_type == XG_MIME_XHTML))
+        {
+          [self setData: md];
+        }
+      else if (actual_type == XG_MIME_URI)
         {
           [self setData: md];
         }
       else if (actual_type == XG_MIME_TIFF)
+        {
+          [self setData: md];
+        }
+      else if (actual_type == XG_MIME_PDF)
+        {
+          [self setData: md];
+        }
+      else if (actual_type == XG_MIME_PS)
+        {
+          [self setData: md];
+        }
+      else if (actual_type == XG_MIME_PNG)
         {
           [self setData: md];
         }
@@ -1115,8 +1413,6 @@ xErrorHandler(Display *d, XErrorEvent *e)
   BOOL			status;
 
   status = [self xProvideSelection: xEvent];
-  if (!status)
-    NSDebugLLog(@"Pbs", @"Could not provide selection upon request.");
 
   /*
    * Set up the selection notify information from the event information
@@ -1144,7 +1440,10 @@ xErrorHandler(Display *d, XErrorEvent *e)
    * knows the request failed.
    */
   if (status == NO)
-    notify_event.property = None;
+    {
+      NSDebugLLog(@"Pbs", @"Could not provide selection upon request.");
+      notify_event.property = None;
+    }
 
   XSendEvent(xEvent->display, xEvent->requestor, False, 0L,
     (XEvent*)&notify_event);
@@ -1154,15 +1453,24 @@ xErrorHandler(Display *d, XErrorEvent *e)
 {
   NSArray	*types = [_pb types];
   Atom		xType = XG_NULL;
-  unsigned char	*data = 0;
+  NSData	*data = nil;
   int		format = 0;
   int		numItems = 0;
+
+  if (GSDebugSet(@"Pbs"))
+    {
+      char *t = XGetAtomName(xDisplay, xEvent->target);
+
+      NSLog(@"xProvideSelection: %s (%lud)",
+	t, xEvent->target);
+      XFree(t);
+    }
 
   if (xEvent->target == XG_TARGETS)
     {
       unsigned	numTypes = 0;
       // ATTENTION: Increase this array when adding more types
-      Atom	xTypes[16];
+      Atom	xTypes[23];
       
       /*
        * The requestor wants a list of the types we can supply it with.
@@ -1183,6 +1491,7 @@ xErrorHandler(Display *d, XErrorEvent *e)
           xTypes[numTypes++] = XG_COMPOUND_TEXT;
           xTypes[numTypes++] = XA_STRING;
           xTypes[numTypes++] = XG_TEXT;
+          xTypes[numTypes++] = XG_MIME_UTF8;
         }
       
       if ([types containsObject: NSFilenamesPboardType])
@@ -1197,73 +1506,98 @@ xErrorHandler(Display *d, XErrorEvent *e)
 	  xTypes[numTypes++] = XG_MIME_TEXT_RICHTEXT;
         }
 
+      if ([types containsObject: NSHTMLPboardType])
+        {
+          xTypes[numTypes++] = XG_MIME_HTML;
+          xTypes[numTypes++] = XG_MIME_XHTML;
+        }
+
+      if ([types containsObject: NSURLPboardType])
+        {
+          xTypes[numTypes++] = XG_MIME_URI;
+        }
+
       if ([types containsObject: NSTIFFPboardType])
         {
           xTypes[numTypes++] = XG_MIME_TIFF;
         }
 
+      if ([types containsObject: NSPasteboardTypePDF])
+        {
+          xTypes[numTypes++] = XG_MIME_PDF;
+        }
+
+      if ([types containsObject: NSPostScriptPboardType])
+        {
+          xTypes[numTypes++] = XG_MIME_PS;
+        }
+
+      if ([types containsObject: NSPasteboardTypePNG])
+        {
+          xTypes[numTypes++] = XG_MIME_PNG;
+        }
+
       xType = XA_ATOM;
       format = 32;
+      data = [NSData dataWithBytes: (const void*)xTypes
+      			    length: numTypes*sizeof(Atom)];
       numItems = numTypes;
-      data = malloc(numTypes*sizeof(Atom));
-      memcpy(data, xTypes, numTypes*sizeof(Atom));
+      if (GSDebugSet(@"Pbs"))
+	{
+	  NSMutableString	*m;
+	  int			i;
+	  Atom			*a = (Atom*)[data bytes];  
+
+	  m = [NSMutableString stringWithCapacity: numItems * 20];
+	  for (i = 0; i < numItems; i++)
+	    {
+	      char	*t = XGetAtomName(xDisplay, a[i]);
+	
+	      if (i > 0)
+		{
+		  [m appendString: @","];
+		}
+	      [m appendFormat: @"%s", t];
+	      XFree(t);
+	    }
+	  NSLog(@"TARGETS supplies %@ for %@", m, types);
+	}
     }
   else if (xEvent->target == XG_TIMESTAMP)
     {
       xType = XA_INTEGER;
       format = 32;
       numItems = 1;
-      data = malloc(sizeof(int));
-      memcpy(data, &_timeOfSetSelectionOwner, sizeof(int));      
+      data = [NSData dataWithBytes: (const void*)_timeOfSetSelectionOwner
+      			    length: sizeof(_timeOfSetSelectionOwner)];
     }
   else if (xEvent->target == XG_USER)
     {
-      NSString *s = NSUserName();
-      NSData *d = nil;
+      NSString	*s = NSUserName();
       
       xType = XG_TEXT;
       format = 8;
-      d = [s dataUsingEncoding: NSISOLatin1StringEncoding];
-      if (d != nil)
-        {
-          numItems = [d length];
-          data = malloc(numItems + 1);
-          if (data)
-            [d getBytes: data];
-        }
+      data = [s dataUsingEncoding: NSISOLatin1StringEncoding];
+      numItems = [data length];
     }
   else if (xEvent->target == XG_OWNER_OS)
     {
-      NSString *s = [[NSProcessInfo processInfo] operatingSystemName];
-      NSData *d = nil;
+      NSString	*s = [[NSProcessInfo processInfo] operatingSystemName];
       
       xType = XG_TEXT;
       format = 8;
-      d = [s dataUsingEncoding: NSISOLatin1StringEncoding];
-      if (d != nil)
-        {
-          numItems = [d length];
-          data = malloc(numItems + 1);
-          if (data)
-            [d getBytes: data];
-        }
+      data = [s dataUsingEncoding: NSISOLatin1StringEncoding];
+      numItems = [data length];
     }
   else if ((xEvent->target == XG_HOST_NAME) 
-           || (xEvent->target == XG_HOSTNAME))
+    || (xEvent->target == XG_HOSTNAME))
     {
-      NSString *s = [[NSProcessInfo processInfo] hostName];
-      NSData *d = nil;
+      NSString	*s = [[NSProcessInfo processInfo] hostName];
       
       xType = XG_TEXT;
       format = 8;
-      d = [s dataUsingEncoding: NSISOLatin1StringEncoding];
-      if (d != nil)
-        {
-          numItems = [d length];
-          data = malloc(numItems + 1);
-          if (data)
-            [d getBytes: data];
-        }
+      data = [s dataUsingEncoding: NSISOLatin1StringEncoding];
+      numItems = [data length];
     }
   else if (xEvent->target == AnyPropertyType)
     {
@@ -1289,6 +1623,31 @@ xErrorHandler(Display *d, XErrorEvent *e)
       else if ([types containsObject: NSTIFFPboardType])
         {
           xEvent->target = XG_MIME_TIFF;
+          [self xProvideSelection: xEvent];
+        }
+      else if ([types containsObject: NSPasteboardTypePDF])
+        {
+          xEvent->target = XG_MIME_PDF;
+          [self xProvideSelection: xEvent];
+        }
+      else if ([types containsObject: NSPostScriptPboardType])
+        {
+          xEvent->target = XG_MIME_PS;
+          [self xProvideSelection: xEvent];
+        }
+      else if ([types containsObject: NSPasteboardTypePNG])
+        {
+          xEvent->target = XG_MIME_PNG;
+          [self xProvideSelection: xEvent];
+        }
+      else if ([types containsObject: NSHTMLPboardType])
+        {
+          xEvent->target = XG_MIME_HTML;
+          [self xProvideSelection: xEvent];
+        }
+      else if ([types containsObject: NSURLPboardType])
+        {
+          xEvent->target = XG_MIME_URI;
           [self xProvideSelection: xEvent];
         }
     }
@@ -1338,10 +1697,10 @@ xErrorHandler(Display *d, XErrorEvent *e)
           }
       }
     }
-  else if ((xEvent->target == XG_COMPOUND_TEXT) &&
-	   [types containsObject: NSStringPboardType])
+  else if ((xEvent->target == XG_COMPOUND_TEXT)
+    && [types containsObject: NSStringPboardType])
     {
-      NSString *s = [_pb stringForType: NSStringPboardType];
+      NSString	*s = [_pb stringForType: NSStringPboardType];
       const char *d;
       int status;
 
@@ -1357,21 +1716,25 @@ xErrorHandler(Display *d, XErrorEvent *e)
                                              XCompoundTextStyle, &textProperty);
           if (status == Success)
             {
+	      NSMutableData	*m;
+
               NSAssert(textProperty.format == 8, @"textProperty.format == 8");
               numItems = textProperty.nitems;
-              data = malloc(numItems + 1);
-              memcpy(data, textProperty.value, numItems + 1);
+              m = [NSMutableData dataWithCapacity: numItems + 1];
+	      [m setLength: numItems + 1];
+              memcpy([m mutableBytes], textProperty.value, numItems + 1);
               XFree((void *)textProperty.value);
+	      data = m;
             }
         }
     }
-  else if (((xEvent->target == XG_UTF8_STRING) || 
-            (xEvent->target == XA_STRING) || 
-            (xEvent->target == XG_TEXT)) &&
-           [types containsObject: NSStringPboardType])
+  else if (((xEvent->target == XG_UTF8_STRING)
+      || (xEvent->target == XA_STRING)
+      || (xEvent->target == XG_TEXT)
+      || (xEvent->target == XG_MIME_UTF8))
+    && [types containsObject: NSStringPboardType])
     {
-      NSString *s = [_pb stringForType: NSStringPboardType];
-      NSData *d = nil;
+      NSString	*s = [_pb stringForType: NSStringPboardType];
 
       xType = xEvent->target;
       format = 8;
@@ -1380,77 +1743,91 @@ xErrorHandler(Display *d, XErrorEvent *e)
        * Now we know what type of data is required - so get it from the
        * pasteboard and convert to a format X can understand.
        */
-      if (xType == XG_UTF8_STRING)
+      if (xType == XG_UTF8_STRING || xType == XG_MIME_UTF8)
         {
-          d = [s dataUsingEncoding: NSUTF8StringEncoding];
+          data = [s dataUsingEncoding: NSUTF8StringEncoding];
         }
       else if ((xType == XA_STRING) || (xType == XG_TEXT))
         {
-          d = [s dataUsingEncoding: NSISOLatin1StringEncoding];
+          data = [s dataUsingEncoding: NSISOLatin1StringEncoding];
         }
 
-      if (d != nil)
-        {
-          numItems = [d length];
-          data = malloc(numItems + 1);
-          if (data)
-            [d getBytes: data];
-        }
+      numItems = [data length];
     }
-  else if ((xEvent->target == XG_FILE_NAME) &&
-	   [types containsObject: NSFilenamesPboardType])
+  else if ((xEvent->target == XG_FILE_NAME)
+    && [types containsObject: NSFilenamesPboardType])
     {
       NSArray	*names = [_pb propertyListForType: NSFilenamesPboardType];
-      NSString *file = [[names lastObject] stringByStandardizingPath];
-      NSURL *url = [[NSURL alloc] initWithScheme: NSURLFileScheme
-                                  host: @"localhost"
-                                  path: file];
-      NSString *s = [url absoluteString];
-      NSData *d;
+      NSString	*file = [[names lastObject] stringByStandardizingPath];
+      NSURL	*url = [[NSURL alloc] initWithScheme: NSURLFileScheme
+						host: @"localhost"
+						path: file];
+      NSString	*s = [url absoluteString];
 
       RELEASE(url);
-      d = [s dataUsingEncoding: NSISOLatin1StringEncoding];
+      data = [s dataUsingEncoding: NSISOLatin1StringEncoding];
       xType = xEvent->target;
       format = 8;
-      if (d != nil)
-        {
-          numItems = [d length];
-          data = malloc(numItems + 1);
-          if (data)
-            [d getBytes: data];
-        }
+      numItems = [data length];
     }
   else if (((xEvent->target == XG_MIME_RTF) 
-            || (xEvent->target == XG_MIME_APP_RTF)
-	    || (xEvent->target == XG_MIME_TEXT_RICHTEXT))
-           && [types containsObject: NSRTFPboardType])
+      || (xEvent->target == XG_MIME_APP_RTF)
+      || (xEvent->target == XG_MIME_TEXT_RICHTEXT))
+    && [types containsObject: NSRTFPboardType])
     {
-      NSData *d = [_pb dataForType: NSRTFPboardType];
-
+      data = [_pb dataForType: NSRTFPboardType];
       xType = xEvent->target;
       format = 8;
-      if (d != nil)
-        {
-          numItems = [d length];
-          data = malloc(numItems + 1);
-          if (data)
-            [d getBytes: data];
-        }
+      numItems = [data length];
     }
-  else if ((xEvent->target == XG_MIME_TIFF) &&
-	   [types containsObject: NSTIFFPboardType])
+  else if (((xEvent->target == XG_MIME_HTML) 
+      || (xEvent->target == XG_MIME_XHTML))
+    && [types containsObject: NSHTMLPboardType])
     {
-      NSData *d = [_pb dataForType: NSTIFFPboardType];
-
+      data = [_pb dataForType: NSHTMLPboardType];
       xType = xEvent->target;
       format = 8;
-      if (d != nil)
-        {
-          numItems = [d length];
-          data = malloc(numItems + 1);
-          if (data)
-            [d getBytes: data];
-        }
+      numItems = [data length];
+    }
+  else if ((xEvent->target == XG_MIME_URI) 
+    && [types containsObject: NSURLPboardType])
+    {
+      data = [_pb dataForType: NSURLPboardType];
+      xType = xEvent->target;
+      format = 8;
+      numItems = [data length];
+    }
+  else if ((xEvent->target == XG_MIME_TIFF)
+    && [types containsObject: NSTIFFPboardType])
+    {
+      data = [_pb dataForType: NSTIFFPboardType];
+      xType = xEvent->target;
+      format = 8;
+      numItems = [data length];
+    }
+  else if ((xEvent->target == XG_MIME_PDF)
+    && [types containsObject: NSPasteboardTypePDF])
+    {
+      data = [_pb dataForType: NSPasteboardTypePDF];
+      xType = xEvent->target;
+      format = 8;
+      numItems = [data length];
+    }
+  else if ((xEvent->target == XG_MIME_PS)
+    && [types containsObject: NSPostScriptPboardType])
+    {
+      data = [_pb dataForType: NSPostScriptPboardType];
+      xType = xEvent->target;
+      format = 8;
+      numItems = [data length];
+    }
+  else if ((xEvent->target == XG_MIME_PNG)
+    && [types containsObject: NSPasteboardTypePNG])
+    {
+      data = [_pb dataForType: NSPasteboardTypePNG];
+      xType = xEvent->target;
+      format = 8;
+      numItems = [data length];
     }
   // FIXME: Support more types
   else
@@ -1466,11 +1843,36 @@ xErrorHandler(Display *d, XErrorEvent *e)
                to: xEvent->requestor property: xEvent->property];
 }
 
-- (BOOL) xSendData: (unsigned char*) data format: (int) format 
+- (BOOL) xSendData: (NSData*) data format: (int) format 
              items: (int) numItems type: (Atom) xType
                 to: (Window) window property: (Atom) property
 {
-  BOOL status = NO;
+  static int32_t	chunk = 0;
+  BOOL			status = NO;
+
+  if (GSDebugSet(@"Pbs"))
+    {
+      char *t = XGetAtomName(xDisplay, xType);
+      char *p = XGetAtomName(xDisplay, property);
+
+      NSLog(@"xSendData:format:items:type:to:property:"
+	@" %d, %d, '%s' (%lu), %lu, '%s' (%lu)",
+	format, numItems, t, xType, window, p, property);
+      XFree(p);
+      XFree(t);
+    }
+
+  /* Assume properties bigger than a quarter of the maximum
+   * request size need to use INCR (ICCCM section 2.5)
+   */
+  if (0 == chunk)
+    {
+      chunk = XExtendedMaxRequestSize(xDisplay) / 4;
+      if (0 == chunk)
+	{
+	  chunk = XMaxRequestSize(xDisplay) / 4;
+	}
+    }
   
   /*
    * If we have managed to convert data of the appropritate type, we must now
@@ -1479,34 +1881,36 @@ xErrorHandler(Display *d, XErrorEvent *e)
    * manager puts a limit on the data size we can use.
    * This is not thread-safe - but I think that's a general problem with X.
    */
-  if (data != 0 && numItems != 0 && format != 0)
+  if (data && numItems != 0 && format != 0)
     {
-      int	(*oldHandler)(Display*, XErrorEvent*);
-      int	mode = PropModeReplace;
-      int	pos = 0;
-      int	maxItems = 4096 * 8 / format;
+      int	maxItems = chunk * 8 / format;
 
-      appendFailure = NO;
-      oldHandler = XSetErrorHandler(xErrorHandler);
+      if (numItems > maxItems)
+	{
+	  Incremental	*i;
 
-      while (appendFailure == NO && pos < numItems)
-        {
-          if (pos + maxItems > numItems)
-            {
-              maxItems = numItems - pos;
-            }
+	  /* We have too much data to set in the property in one go,
+	   * so we use the INCR protocol to send chunks.
+	   * If there's a transfer in progress, we need to restart,
+	   * otherwise we create a new one.
+	   */
+	  i = [Incremental findINCR: property for: window];
+	  if (nil == i)
+	    {
+	      i = [Incremental makeINCR: property for: window];
+	    }
+	  [i setData: data type: xType format: format chunk: chunk];
+
+	  XChangeProperty(xDisplay, window, property,
+	    XG_INCR, 32, PropModeReplace, (const unsigned char*)&chunk, 1);
+	}
+      else
+	{
           XChangeProperty(xDisplay, window, property,
-                          xType, format, mode, &data[pos*format/8], maxItems);
-          mode = PropModeAppend;
-          pos += maxItems;
-          XSync(xDisplay, False);
+	    xType, format, PropModeReplace,
+	    (const unsigned char *)[data bytes], numItems);
         }
-      free(data);
-      XSetErrorHandler(oldHandler);
-      if (appendFailure == NO)
-        {
-          status = YES;
-        }
+      status = YES;
     }
   return status;
 }
@@ -1573,6 +1977,130 @@ xErrorHandler(Display *d, XErrorEvent *e)
       whenRequested = CurrentTime;
     }
   return whenRequested;
+}
+
+@end
+
+@implementation	Incremental
+
+static NSMutableArray	*active = nil;
+
++ (Incremental*) findINCR: (Atom)p for: (Window)w
+{
+  NSUInteger		pos = [active count];
+  NSTimeInterval	now = [NSDate timeIntervalSinceReferenceDate];
+
+  while (pos-- > 0)
+    {
+      Incremental	*i = [active objectAtIndex: pos]; 
+
+      if (i->window == w && i->property == p)
+	{
+	  return AUTORELEASE(RETAIN(i));
+	}
+      if (now - i->start > 60.0)
+	{
+	  [i abort];
+	}
+    }
+  return nil;
+}
+
++ (Incremental*) makeINCR: (Atom)p for: (Window)w
+{
+  Incremental	*i = [self new];
+
+  i->window = w;
+  i->property = p;
+  if (nil == active)
+    {
+      active = [NSMutableArray new];
+    }
+  [active addObject: i];
+
+  /* We need property deletion events from the window.
+   */
+  XSelectInput(xDisplay, i->window, PropertyChangeMask);
+  return AUTORELEASE(i);
+}
+
+- (void) abort
+{
+  NSDebugLLog(@"Pbs", @"Aborting %@", self);
+  XChangeProperty(xDisplay, window, property,
+    xType, format, PropModeReplace,
+    (const unsigned char *)"", 0);
+  if (window != xAppWin)
+    {
+      XSelectInput(xDisplay, window, 0);
+    }
+  [active removeObjectIdenticalTo: self];
+}
+
+- (void) dealloc
+{
+  RELEASE(data);
+  if (pname) XFree((void*)pname);
+  if (tname) XFree((void*)tname);
+  DEALLOC
+}
+
+- (NSString*) description
+{
+  if (pname == NULL)
+    {
+      pname = XGetAtomName(xDisplay, property);
+    }
+  if (tname == NULL)
+    {
+      tname = XGetAtomName(xDisplay, xType);
+    }
+  return [NSString stringWithFormat:
+    @"<INCR %s %s window %lu offset %llu in %llu>",
+    tname, pname, window, (unsigned long long)offset, 
+    (unsigned long long)[data length]];
+}
+
+/* When the other end deletes the property we can add a new chunk of data.
+ * After the last chunk of data, we add an empty chunk to mark the end of
+ * the transfer.
+ */
+- (void) propertyDeleted
+{
+  NSUInteger	length = [data length];
+  NSUInteger	remain = length - offset;
+  NSUInteger	size = (remain > chunk) ? chunk : remain;
+
+  NSDebugLLog(@"Pbs", @"Sending %@", self);
+  XChangeProperty(xDisplay, window, property,
+    xType, format, PropModeReplace,
+    ((const unsigned char *)[data bytes]) + offset,
+    (((int)size * 8) / format));
+  offset += size;
+  if (0 == size)
+    {
+      /* We just sent the final (empty) part of the data.
+       */
+      NSDebugLLog(@"Pbs", @"Completed %@", self);
+      if (window != xAppWin)
+	{
+	  /* No longer interested in events from this window.
+	   */
+	  XSelectInput(xDisplay, window, 0);
+	}
+      [active removeObjectIdenticalTo: self];
+    }
+}
+
+- (void) setData: (NSData*)d type: (Atom)t format: (int)f chunk: (int)c
+{
+  start = [NSDate timeIntervalSinceReferenceDate];
+  ASSIGN(data, d);
+  offset = 0;
+  format = f;
+  chunk = c;
+  xType = t;
+  NSDebugLLog(@"Pbs", @"Starting %@", self);
 }
 
 @end
@@ -1674,7 +2202,7 @@ static DndClass dnd;
   Atom mType = XInternAtom(xDisplay, [mime cString], False);
 
   [self setData: nil];
-	[self requestData: mType];
+  [self requestData: mType];
   [pb setData: [self data] forType: type];
 }
 

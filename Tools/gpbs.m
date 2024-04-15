@@ -229,7 +229,8 @@ NSMutableDictionary	*pasteboards = nil;
 {
   if (verbose)
     {
-      NSLog(@"-data for %@", self);
+      NSLog(@"-data (%llu bytes) provided for %@",
+	(unsigned long long)[data length], self);
     }
   return data;
 }
@@ -285,7 +286,8 @@ NSMutableDictionary	*pasteboards = nil;
   ASSIGN(data, d);
   if (verbose)
     {
-      NSLog(@"-setData: for %@", self);
+      NSLog(@"-setData: (%llu bytes) for %@",
+	(unsigned long long)[data length], self);
     }
 }
 
@@ -863,8 +865,8 @@ NSMutableDictionary	*pasteboards = nil;
   e = [self entryByCount: count];
   if (verbose)
     {
-      NSLog(@"%@ set data %p for type '%@' version %d in %@",
-	self, data, type, count, e);
+      NSLog(@"%@ set data %p (%llu bytes) for type '%@' version %d in %@",
+	self, data, (unsigned long long)[data length], type, count, e);
     }
   if (e)
     {
