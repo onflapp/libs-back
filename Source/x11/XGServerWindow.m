@@ -1376,6 +1376,44 @@ _get_next_prop_new_event(Display *display, XEvent *event, char *arg)
     }
 }
 
+- (void) _setWindowInfo: (gswindow_device_t *) window
+{
+  NSWindow *nswin = GSWindowWithNumber(window->number);
+  if (nswin)
+    {
+      const char *winclass = [NSStringFromClass([nswin class]) UTF8String];
+      NSInteger winnum = [nswin windowNumber];
+
+      if ([nswin respondsToSelector: @selector(windowClassName)])
+        {
+          NSString *wcn = [nswin performSelector: @selector(windowClassName)
+                                      withObject:nil];
+          if (wcn)
+            winclass = [wcn UTF8String];
+        }
+      else
+        {
+          if (strcmp(winclass, "NSWindow") == 0 && 
+              [nswin canBecomeKeyWindow] &&
+              [nswin styleMask] & NSTitledWindowMask &&
+              [nswin styleMask] & NSClosableWindowMask &&
+              [nswin styleMask] & NSResizableWindowMask &&
+              [nswin styleMask] & NSMiniaturizableWindowMask)
+            winclass = "NSDocumentWindow";
+        }
+
+      XChangeProperty(dpy, window->ident,
+                        generic._GNUSTEP_WINDOW_CLASS_ATOM, generic.UTF8_STRING_ATOM,
+                        8, PropModeReplace, 
+                        (unsigned char *)winclass, strlen(winclass));
+
+      XChangeProperty(dpy, window->ident,
+                        generic._GNUSTEP_WINDOW_NUMBER_ATOM, XA_CARDINAL,
+                        32, PropModeReplace,
+                        (unsigned char*)&winnum, 1);
+    }
+}
+
 - (void) _setSupportedWMProtocols: (gswindow_device_t *) window
 {
   NSWindow *nswin = GSWindowWithNumber(window->number);
@@ -2871,6 +2909,9 @@ swapColors(unsigned char *image_data, NSBitmapImageRep *rep)
 
       setNormalHints(dpy, window);
       XSetWMHints(dpy, window->ident, &window->gen_hints);
+
+      if (window->visibility == -1) 
+        [self _setWindowInfo:window];
 
       /*
        * If we are asked to set hints for the appicon and the window manager is
