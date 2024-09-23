@@ -145,6 +145,11 @@ xdnd_is_dnd_aware(DndClass *dnd, Window window, int *version, Atom *typelist)
     }
 
   types = (Atom *) data;
+  if (types[0] < 3) {
+    if (data)
+      XFree(data);
+    return 0;
+  }
   *version = dnd->version < types[0] ? dnd->version : types[0];	// minimum
   dnd_debug ("Using XDND version %d", *version);
   if (count > 1) 
