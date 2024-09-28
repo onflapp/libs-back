@@ -44,6 +44,8 @@
 #include "x11/XGServerWindow.h"
 #include "x11/XGDragView.h"
 
+#include "xpbs.h"
+
 /* Size of the dragged window */
 #define	DWZ	48
 
@@ -89,7 +91,6 @@ DndClass xdnd (void)
 {
   return dnd;			// FIX ME rename with private desig
 }
-
 
 Atom 
 GSActionForDragOperation(unsigned int op)
@@ -189,7 +190,18 @@ static	XGDragView	*sharedDragView = nil;
   destExternal = YES;
   operationMask = NSDragOperationAll;
 
-  ASSIGN(dragPasteboard, [NSPasteboard pasteboardWithName: NSDragPboard]);
+  Window source = XDND_ENTER_SOURCE_WIN(xEvent);
+
+  int dnd_type = xdnd_app_type(XDPY, source);
+  if (dnd_type == XDND_APP_TYPE_GNUSTEP) {
+    NSLog(@"GNUstep application");
+    ASSIGN(dragPasteboard, [NSPasteboard pasteboardWithName: NSDragPboard]);
+  }
+  else {
+    NSLog(@"xdnd application %x", source);
+    ASSIGN(dragPasteboard, [NSPasteboard pasteboardWithUniqueName]);
+    [XDNDLocalDragProcess startProcessForWindow:source pasteboard: dragPasteboard];
+  }
 }
 
 - (void) updateDragInfoFromEvent: (NSEvent*)event

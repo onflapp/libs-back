@@ -41,6 +41,8 @@
 #include <X11/extensions/Xfixes.h>
 #endif
 
+#include "xpbs.h"
+
 /*
  *	Non-predefined atoms that are used in the X selection mechanism
  */
@@ -244,69 +246,6 @@ NSPasteboardTypeFromAtom(Atom type)
 - (void) setData: (NSData*)d type: (Atom)t format: (int)f chunk: (int)c;
 @end
 
-@interface	XPbOwner : NSObject
-{
-  NSPasteboard	*_pb;
-  NSData	*_obj;
-  NSString	*_name;
-  Atom		_xPb;
-  Time		_waitingForSelection;
-  Time		_timeOfLastAppend;
-  Time		_timeOfSetSelectionOwner;
-  BOOL		_ownedByOpenStep;
-}
-
-+ (XPbOwner*) ownerByXPb: (Atom)p;
-+ (XPbOwner*) ownerByOsPb: (NSString*)p;
-+ (void) receivedEvent: (void*)data
-                  type: (RunLoopEventType)type
-                 extra: (void*)extra
-               forMode: (NSString*)mode;
-+ (NSDate*) timedOutEvent: (void*)data
-                     type: (RunLoopEventType)type
-                  forMode: (NSString*)mode;
-+ (void) xEvent: (XEvent *)xEvent;
-+ (void) xPropertyNotify: (XPropertyEvent*)xEvent;
-+ (void) xSelectionClear: (XSelectionClearEvent*)xEvent;
-+ (void) xSelectionNotify: (XSelectionEvent*)xEvent;
-+ (void) xSelectionRequest: (XSelectionRequestEvent*)xEvent;
-
-- (NSData*) data;
-- (id) initWithXPb: (Atom)x osPb: (NSPasteboard*)o;
-- (BOOL) ownedByOpenStep;
-- (NSPasteboard*) osPb;
-- (void) pasteboardChangedOwner: (NSPasteboard*)sender;
-- (void) pasteboard: (NSPasteboard*)pb provideDataForType: (NSString*)type;
-- (void) setData: (NSData*)obj;
-- (void) setOwnedByOpenStep: (BOOL)flag;
-- (void) setTimeOfLastAppend: (Time)when;
-- (void) setWaitingForSelection: (Time)when;
-- (Time) timeOfLastAppend;
-- (Time) waitingForSelection;
-- (Atom) xPb;
-- (void) xSelectionClear;
-- (void) xSelectionNotify: (XSelectionEvent*)xEvent;
-- (void) xSelectionRequest: (XSelectionRequestEvent*)xEvent;
-#if HAVE_XFIXES
-+ (void) xFixesSelectionNotify: (XFixesSelectionNotifyEvent*)xEvent;
-#endif
-- (BOOL) xProvideSelection: (XSelectionRequestEvent*)xEvent;
-- (Time) xTimeByAppending;
-- (BOOL) xSendData: (NSData*) data format: (int) format 
-	     items: (int) numItems type: (Atom) xType
-		to: (Window) window property: (Atom) property;
-@end
-
-
-
-// Special subclass for the drag pasteboard
-@interface	XDragPbOwner : XPbOwner
-{
-}
-@end
-
-
-
 /*
  *	The display we are using - everything refers to it.
  */
@@ -324,12 +263,16 @@ static int              xFixesEventBase;
 
 + (BOOL) initializePasteboard
 {
-  XPbOwner *o;
-  NSPasteboard *p;
-  Atom generalPb, selectionPb;
-  NSRunLoop *l = [NSRunLoop currentRunLoop];
-  int desc;
+  if ([self _initAtoms]) {
+    if ([self _initRunLoop]) {
+      return [self _initSelections];
+    }
+  }
+  return NO;
+}
 
++ (BOOL) _initAtoms 
+{
   ownByO = NSCreateMapTable(NSObjectMapKeyCallBacks,
                   NSNonOwnedPointerMapValueCallBacks, 0);
   ownByX = NSCreateMapTable(NSIntMapKeyCallBacks,
@@ -356,10 +299,18 @@ static int              xFixesEventBase;
        atoms[atomCount] = XInternAtom(xDisplay, atom_names[atomCount], False);
    }
 #endif
+   return YES;
+}
+
++ (BOOL) _initRunLoop 
+{
+  NSRunLoop *l = [NSRunLoop currentRunLoop];
+  int desc;
 
   xRootWin = RootWindow(xDisplay, DefaultScreen(xDisplay));
   xAppWin = XCreateSimpleWindow(xDisplay, xRootWin,
                                 0, 0, 100, 100, 1, 1, 0L);
+
   /*
    * Add the X descriptor to the run loop so we get callbacks when
    * X events arrive.
@@ -382,6 +333,15 @@ static int              xFixesEventBase;
       forMode: xWaitMode];
 
   XSelectInput(xDisplay, xAppWin, PropertyChangeMask);
+  XFlush(xDisplay);
+  return YES;
+}
+
++ (BOOL) _initSelections
+{
+  XPbOwner *o;
+  NSPasteboard *p;
+  Atom generalPb, selectionPb;
 
 #if HAVE_XFIXES
   {
@@ -2105,8 +2065,6 @@ static NSMutableArray	*active = nil;
 
 @end
 
-
-
 // This are copies of functions from XGContextEvent.m. 
 // We should create a separate file for them.
 static inline
@@ -2185,12 +2143,21 @@ static DndClass dnd;
 - (NSArray*) availableTypes
 {
   Window window;
-  Atom *types;
-  NSArray *newTypes;
-	
   window = XGetSelectionOwner(xDisplay, dnd.XdndSelection);
+  printf("Xselection owner %x\n", window);
   if (window == None)
     return nil;
+  else
+    return [self availableTypesForWindow:window];
+}
+
+- (NSArray*) availableTypesForWindow:(Window) window
+{
+  Atom *types;
+  NSArray *newTypes;
+
+  NSLog(@"types for window %x", window);
+	
   xdnd_get_type_list(&dnd, window, &types);
   newTypes = pasteboardTypeForMimeType(xDisplay, [self zone], types);
   free(types);
@@ -2213,4 +2180,98 @@ static DndClass dnd;
   [self setOwnedByOpenStep: NO];
 }
 
+@end
+
+static XDNDLocalDragProcess* drag_process = nil;
+
+@implementation XDNDLocalDragProcess : NSObject
+
++ (void) startProcessForWindow:(Window) win pasteboard:(NSPasteboard*) pb {
+  if (drag_process == nil)
+    drag_process = [[XDNDLocalDragProcess alloc] init];
+
+  [drag_process _start:win pasteboard:pb];
+}
+
+- (id) init {
+  self = [super init];
+
+  return self;
+}
+
+- (void) _start:(Window) win pasteboard:(NSPasteboard*) pb {
+  if (src_window != None) {
+    NSLog(@"process is running already?");
+    return;
+  }
+  src_window = win;
+  pboard = [pb retain];
+
+  [drag_process performSelectorInBackground:@selector(processXWindowsEvents:) withObject:self];
+}
+
+- (void) dealloc {
+  NSLog(@"dealloc");
+  [[NSNotificationCenter defaultCenter] removeObserver:self];
+  [super dealloc];
+}
+
+- (void) updatePasteboard:(NSArray*) items {
+  NSMutableArray* types = [NSMutableArray array];
+  for (NSDictionary* it in items) {
+    NSString* type = [it valueForKey:@"type"];
+    [types addObject:type];
+  }
+
+  NSLog(@"update types %@", types);
+
+  /*
+  [pboard declareTypes:types owner:nil];
+  for (NSDictionary* it in items) {
+    NSString* type = [it valueForKey:@"type"];
+    NSData* data = [it valueForKey:@"data"];
+    [pboard setData:data forType:type];
+  }
+  */
+
+  [pboard release];
+  src_window = None;
+}
+
+- (void) processXWindowsEvents:(id) sender {
+  XInitThreads();
+  CREATE_AUTORELEASE_POOL(pool);
+
+  NSLog(@"XDND process for window %x", src_window);
+
+  [XPbOwner _initAtoms];
+  [XPbOwner _initRunLoop];
+  [XDragPbOwner class];
+
+  XDragPbOwner* o = (XDragPbOwner*)[XPbOwner ownerByOsPb: NSDragPboard];
+  NSPasteboard* p = [NSPasteboard pasteboardWithName: NSDragPboard];
+
+  NSMutableArray* pitems = [[NSMutableArray alloc] init];
+
+  NSLog(@"aaaa %@", o);
+  for (NSString* type in [o availableTypesForWindow:src_window]) {
+    [o pasteboard:p provideDataForType:NSStringPboardType];
+    NSData* data = [o data];
+
+    if (data) {
+      [pitems addObject:[NSDictionary dictionaryWithObjectsAndKeys:
+        type, @"type",
+        data, @"data",
+        nil
+      ]];
+    }
+  }
+
+  [self performSelectorOnMainThread:@selector(updatePasteboard:) withObject:pitems waitUntilDone:NO];
+  NSLog(@"end");
+  XDestroyWindow(xDisplay, xAppWin);
+  XCloseDisplay(xDisplay);
+
+  RELEASE(pool);
+}
 @end

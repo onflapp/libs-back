@@ -24,13 +24,15 @@
 #ifndef _X_DND_H
 #define _X_DND_H
 
-#define XDND_VERSION 2
+#define XDND_VERSION 3
 
 /* XdndEnter */
 #define XDND_THREE 3
 #define XDND_ENTER_SOURCE_WIN(e)		((e)->xclient.data.l[0])
 #define XDND_ENTER_THREE_TYPES(e)		(((e)->xclient.data.l[1] & 0x1UL) == 0)
 #define XDND_ENTER_THREE_TYPES_SET(e,b)	(e)->xclient.data.l[1] = ((e)->xclient.data.l[1] & ~0x1UL) | (((b) == 0) ? 0 : 0x1UL)
+#define XDND_ENTER_THREE_TYPES_GET(e, i)        ((e)->data.l[2 + (i)])
+
 #define XDND_ENTER_VERSION(e)			((e)->xclient.data.l[1] >> 24)
 #define XDND_ENTER_VERSION_SET(e,v)		(e)->xclient.data.l[1] = ((e)->xclient.data.l[1] & ~(0xFF << 24)) | ((v) << 24)
 #define XDND_ENTER_TYPE(e,i)			((e)->xclient.data.l[2 + i])	/* i => (0, 1, 2) */
@@ -92,6 +94,9 @@ struct _DndClass {
     Atom version;
     Window root_window;
 
+#define XDND_APP_TYPE_DEFAULT           0
+#define XDND_APP_TYPE_GNUSTEP           1
+
 #define XDND_DROP_STAGE_IDLE		0
 #define XDND_DRAG_STAGE_DRAGGING	1
 #define XDND_DRAG_STAGE_ENTERED		2
@@ -115,6 +120,9 @@ struct _DndClass {
 /* block for only this many seconds on not receiving a XdndFinished from target, default : 10 */
     int time_out;
 };
+
+int xdnd_typelist_length(Atom * a);
+int xdnd_app_type(Display * dpy, Window win) ;
 
 void xdnd_init (DndClass * dnd, Display * display);
 void xdnd_set_dnd_aware (DndClass * dnd, Window window, Atom * typelist);

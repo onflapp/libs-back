@@ -48,6 +48,7 @@ endif
 
 # The Objective-C source files to be compiled
 x11_OBJC_FILES = \
+xpbs.m \
 XGServer.m \
 XGServerEvent.m \
 XGServerWindow.m \

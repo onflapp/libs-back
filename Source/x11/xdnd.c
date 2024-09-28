@@ -28,17 +28,18 @@
 #include <X11/Xlib.h>
 #include <X11/X.h>
 #include <X11/Xatom.h>
+#include <X11/Xutil.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include "x11/xdnd.h"
 
 
-// #define DND_DEBUG 
+#define DND_DEBUG 
 #define dnd_version_at_least(a,b) ((a) <= (b))
 
 #ifdef DND_DEBUG
-#define dnd_debug(a,b...) printf("%s: %d: " a "\n", __FILE__, __LINE__ , ## b)
+#define dnd_debug(a,b...) fprintf(stderr, "%s: %d: " a "\n", __FILE__, __LINE__ , ## b)
 #else
 
 #ifdef NeXT_RUNTIME
@@ -97,11 +98,33 @@ xdnd_init(DndClass * dnd, Display * display)
   xdnd_reset(dnd);
 }
 
-static int
-array_length(Atom * a)
-{				// typelist is a null terminated array
+int
+xdnd_app_type(Display * dpy, Window win) 
+{
+  XClassHint *class_hint;
+  class_hint = XAllocClassHint();
+  
+  if (XGetClassHint(dpy, win, class_hint) == 0) {
+    XFree(class_hint);
+    return XDND_APP_TYPE_DEFAULT;
+  }
+  if (strcmp(class_hint->res_class, "GNUstep") == 0) {
+    XFree(class_hint);
+    return XDND_APP_TYPE_GNUSTEP;
+  }
+  else {
+    XFree(class_hint);
+    return XDND_APP_TYPE_DEFAULT;
+  }
+}
+
+int
+xdnd_typelist_length(Atom * a)
+{
+  if (!a) return 0;
   int n = 0;
 
+  // typelist is a null terminated array
   while (a[n])
     n++;
   return n;
@@ -114,7 +137,7 @@ xdnd_set_dnd_aware (DndClass * dnd, Window window, Atom * typelist)
     PropModeReplace, (unsigned char *) &dnd->version, 1);
   if (typelist) 
     {
-      int n = array_length (typelist);
+      int n = xdnd_typelist_length (typelist);
       if (n)
 	XChangeProperty (dnd->display, window, dnd->XdndAware, XA_ATOM, 32, 
 	  PropModeAppend, (unsigned char *) typelist, n);
@@ -138,7 +161,7 @@ xdnd_is_dnd_aware(DndClass *dnd, Window window, int *version, Atom *typelist)
 
   if (actual != XA_ATOM || format != 32 || count == 0 || !data) 
     {
-      dnd_debug("XGetWindowProperty failed in xdnd_is_dnd_aware - XdndAware = %ld", dnd->XdndAware);
+      dnd_debug("XGetWindowProperty failed in xdnd_is_dnd_aware - XdndAware = %ld win:%x", dnd->XdndAware, window);
       if (data)
 	XFree(data);
       return 0;
@@ -175,7 +198,9 @@ xdnd_send_enter(DndClass *dnd, Window window, Window from, Atom *typelist)
   XEvent xevent;
   int n, i;
 
-  n = array_length (typelist);
+  n = xdnd_typelist_length (typelist);
+
+  dnd_debug ("XdndEnter");
 
   memset(&xevent, 0, sizeof (xevent));
 
@@ -202,6 +227,8 @@ xdnd_send_position(DndClass *dnd, Window window, Window from, Atom action,
 {
   XEvent xevent;
 
+  dnd_debug ("XdndPosition");
+
   memset (&xevent, 0, sizeof (xevent));
 
   xevent.xany.type = ClientMessage;
@@ -225,6 +252,8 @@ xdnd_send_status(DndClass *dnd, Window window, Window from, int will_accept,
   int want_position, int x, int y, int w, int h, Atom action)
 {
   XEvent xevent;
+
+  //dnd_debug ("XdndStatus %d", will_accept);
 
   memset (&xevent, 0, sizeof (xevent));
 
@@ -269,6 +298,8 @@ void
 xdnd_send_drop(DndClass *dnd, Window window, Window from, unsigned long time)
 {
   XEvent xevent;
+
+  dnd_debug ("XdndDrop");
 
   memset (&xevent, 0, sizeof (xevent));
 
@@ -358,7 +389,7 @@ xdnd_selection_send(DndClass * dnd, XSelectionRequestEvent * request,
 void
 xdnd_set_type_list(DndClass * dnd, Window window, Atom * typelist)
 {
-  int n = array_length (typelist);
+  int n = xdnd_typelist_length (typelist);
 
   XChangeProperty (dnd->display, window, dnd->XdndTypeList, XA_ATOM, 32,
     PropModeReplace, (unsigned char *) typelist, n);
