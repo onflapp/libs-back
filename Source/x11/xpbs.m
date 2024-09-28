@@ -288,18 +288,21 @@ static int              xFixesEventBase;
   /*
    * Set up atoms for use in X selection mechanism.
    */
+
+  if (atoms[0] == 0) {
 #ifdef HAVE_XINTERNATOMS
-   XInternAtoms(xDisplay, atom_names, sizeof(atom_names)/sizeof(char*),
+    XInternAtoms(xDisplay, atom_names, sizeof(atom_names)/sizeof(char*),
                 False, atoms);
 #else
-   {
-     int atomCount;
+    {
+      int atomCount;
 
-     for (atomCount = 0; atomCount < sizeof(atom_names)/sizeof(char*); atomCount++)
-       atoms[atomCount] = XInternAtom(xDisplay, atom_names[atomCount], False);
-   }
+      for (atomCount = 0; atomCount < sizeof(atom_names)/sizeof(char*); atomCount++)
+        atoms[atomCount] = XInternAtom(xDisplay, atom_names[atomCount], False);
+    }
 #endif
-   return YES;
+  }
+  return YES;
 }
 
 + (BOOL) _initRunLoop 
@@ -2182,6 +2185,18 @@ static DndClass dnd;
 
 @end
 
+@implementation XDNDLocalDragPbOwner : XDragPbOwner
+
++ (void) initialize
+{
+}
+
+- (void) pasteboardChangedOwner: (NSPasteboard*)sender
+{
+}
+
+@end
+
 static XDNDLocalDragProcess* drag_process = nil;
 
 @implementation XDNDLocalDragProcess : NSObject
@@ -2225,14 +2240,12 @@ static XDNDLocalDragProcess* drag_process = nil;
 
   NSLog(@"update types %@", types);
 
-  /*
   [pboard declareTypes:types owner:nil];
   for (NSDictionary* it in items) {
     NSString* type = [it valueForKey:@"type"];
     NSData* data = [it valueForKey:@"data"];
     [pboard setData:data forType:type];
   }
-  */
 
   [pboard release];
   src_window = None;
@@ -2246,14 +2259,17 @@ static XDNDLocalDragProcess* drag_process = nil;
 
   [XPbOwner _initAtoms];
   [XPbOwner _initRunLoop];
-  [XDragPbOwner class];
 
-  XDragPbOwner* o = (XDragPbOwner*)[XPbOwner ownerByOsPb: NSDragPboard];
+  if (!dnd.display)
+    xdnd_init(&dnd, xDisplay);
+  else
+    dnd.display = xDisplay;
+
   NSPasteboard* p = [NSPasteboard pasteboardWithName: NSDragPboard];
+  XDragPbOwner* o = (XDragPbOwner*)[[XDNDLocalDragPbOwner alloc] initWithXPb: dnd.XdndSelection osPb: p];
 
   NSMutableArray* pitems = [[NSMutableArray alloc] init];
 
-  NSLog(@"aaaa %@", o);
   for (NSString* type in [o availableTypesForWindow:src_window]) {
     [o pasteboard:p provideDataForType:NSStringPboardType];
     NSData* data = [o data];

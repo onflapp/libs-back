@@ -326,8 +326,9 @@ xdnd_send_finished(DndClass * dnd, Window window, Window from, int error)
   xevent.xclient.window = window;				
   xevent.xclient.message_type = dnd->XdndFinished;
   xevent.xclient.format = 32;
-
   XDND_FINISHED_TARGET_WIN (&xevent) = from;
+  xevent.xclient.data.l[1] = 1;
+  xevent.xclient.data.l[2] = dnd->XdndActionCopy;
 
   XSendEvent (dnd->display, window, 0, 0, &xevent);
 }

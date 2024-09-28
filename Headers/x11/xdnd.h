@@ -24,7 +24,7 @@
 #ifndef _X_DND_H
 #define _X_DND_H
 
-#define XDND_VERSION 3
+#define XDND_VERSION 5
 
 /* XdndEnter */
 #define XDND_THREE 3
